@@ -22,6 +22,7 @@ from sklearn.utils.testing import ignore_warnings
 from collections import defaultdict
 from joblib import Parallel, delayed
 import multiprocessing as mp
+from batch_enhancement import BatchEnhancementOnX
 
 class DecisionTree:
     """ Tree Node Class
@@ -1360,3 +1361,32 @@ class UpliftRandomForestClassifier:
             return df_res
         else:
             return y_pred_list
+
+    
+    @staticmethod
+    def bootstrap_pm(X, treatment, y, tree):
+        '''
+        Serve for bootstrap function. 
+        Before feeding to train a tree, we enhance the data by matching on X.
+        '''
+        train_ids = len(X) - 1
+        num_treatments = len(set(treatment))
+        batch = BatchEnhancementOnX()
+        batch.make_propensity_lists(train_ids, X, t, num_treatments)
+
+        bt_index = np.random.choice(len(X), len(X))
+        x_train_bt = X[bt_index]
+        y_train_bt = y[bt_index]
+        t_train_bt = treatment[bt_index]
+
+        t_indices = list(map(lambda t_idx: np.where(t_train_bt == t_idx)[0], range(num_treatments)))
+        t_lens = list(map(lambda x: len(x), t_indices))
+        
+        base_treatment_idx = np.argmin(t_lens)
+        base_indices = t_indices[base_treatment_idx]
+
+        inner_x, inner_t, inner_y = x_train_bt[base_indices], t_train_bt[base_indices], y_train_bt[base_indices]
+
+        x_batch, t_batch, y_batch = batch.enhance_batch_with_propensity_matches(X, t, y, inner_x, inner_t, inner_y, num_treatments, 6)
+        tree.fit(X=x_batch, treatment=t_batch, y=y_batch)
+        return tree
