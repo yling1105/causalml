@@ -1364,7 +1364,7 @@ class UpliftRandomForestClassifier:
 
     
 
-class PMUpliftRandomForestClassifier:
+class BTPMUpliftRandomForest:
     """ Uplift Random Forest for Classification Task with enhanced batch to train a treee
 
     Parameters
@@ -1591,6 +1591,261 @@ class PMUpliftRandomForestClassifier:
         batch.make_propensity_lists(train_ids, X, t_id, num_treatments)
 
         bt_index = np.random.choice(len(X), len(X))
+        x_train_bt = X[bt_index]
+        y_train_bt = y[bt_index]
+        t_train_bt = t_id[bt_index]
+
+        t_indices = list(map(lambda t_idx: np.where(t_train_bt == t_idx)[0], range(num_treatments)))
+        t_lens = list(map(lambda x: len(x), t_indices))
+        
+        base_treatment_idx = np.argmin(t_lens)
+        base_indices = t_indices[base_treatment_idx]
+
+        inner_x, inner_t, inner_y = x_train_bt[base_indices], t_train_bt[base_indices], y_train_bt[base_indices]
+
+        x_batch, t_batch, y_batch = batch.enhance_batch_with_propensity_matches(X, t_id, y, inner_x, inner_t, inner_y, num_treatments, 6)
+        t_batch_new = [0] * len(t_batch)
+        for i in range(len(t_batch)):
+            if t_batch[i] == 0:
+                t_batch_new[i] = "control"
+            elif t_batch[i] == 1:
+                t_batch_new[i] = "treatment1"
+            elif t_batch[i] == 2:
+                t_batch_new[i] = "treatment2"
+            else:
+                t_batch_new[i] = "treatment3"
+        t_batch_new = np.array(t_batch_new)
+        t_batch_new.astype(object)
+        tree.fit(X=x_batch, treatment=t_batch_new, y=y_batch)
+        return tree
+    
+class PMUpliftRandomForest:
+    """ Uplift Random Forest for Classification Task with enhanced batch to train a treee
+
+    Parameters
+    ----------
+    n_estimators : integer, optional (default=10)
+        The number of trees in the uplift random forest.
+
+    evaluationFunction : string
+        Choose from one of the models: 'KL', 'ED', 'Chi', 'CTS'.
+
+    max_features: int, optional (default=10)
+        The number of features to consider when looking for the best split.
+
+    random_state: int, optional (default=2019)
+        The seed used by the random number generator.
+
+    max_depth: int, optional (default=5)
+        The maximum depth of the tree.
+
+    min_samples_leaf: int, optional (default=100)
+        The minimum number of samples required to be split at a leaf node.
+
+    min_samples_treatment: int, optional (default=10)
+        The minimum number of samples required of the experiment group to be split at a leaf node.
+
+    n_reg: int, optional (default=10)
+        The regularization parameter defined in Rzepakowski et al. 2012, the
+        weight (in terms of sample size) of the parent node influence on the
+        child node, only effective for 'KL', 'ED', 'Chi', 'CTS' methods.
+
+    control_name: string
+        The name of the control group (other experiment groups will be regarded as treatment groups)
+
+    normalization: boolean, optional (default=True)
+        The normalization factor defined in Rzepakowski et al. 2012,
+        correcting for tests with large number of splits and imbalanced
+        treatment and control splits
+    
+    n_jobs: int, optional (default=-1)
+        The parallelization parameter to define how many parallel jobs need to be created. 
+        This is passed on to joblib library for parallelizing uplift-tree creation.
+
+    Outputs
+    ----------
+    df_res: pandas dataframe
+        A user-level results dataframe containing the estimated individual treatment effect.
+    """
+    def __init__(self,
+                 n_estimators=10,
+                 max_features=10,
+                 random_state=2019,
+                 max_depth=5,
+                 min_samples_leaf=100,
+                 min_samples_treatment=10,
+                 n_reg=10,
+                 evaluationFunction=None,
+                 control_name=None,
+                 normalization=True,
+                 n_jobs=-1):
+        """
+        Initialize the UpliftRandomForestClassifier class.
+        """
+        self.classes_ = {}
+        self.n_estimators = n_estimators
+        self.max_features = max_features
+        self.random_state = random_state
+        self.max_depth = max_depth
+        self.min_samples_leaf = min_samples_leaf
+        self.min_samples_treatment = min_samples_treatment
+        self.n_reg = n_reg
+        self.evaluationFunction = evaluationFunction
+        self.control_name = control_name
+        self.n_jobs = n_jobs
+
+        # Create forest
+        self.uplift_forest = []
+        for _ in range(n_estimators):
+            uplift_tree = UpliftTreeClassifier(
+                max_features=self.max_features, max_depth=self.max_depth,
+                min_samples_leaf=self.min_samples_leaf,
+                min_samples_treatment=self.min_samples_treatment,
+                n_reg=self.n_reg,
+                evaluationFunction=self.evaluationFunction,
+                control_name=self.control_name,
+                normalization=normalization)
+
+            self.uplift_forest.append(uplift_tree)
+
+        if self.n_jobs == -1:
+            self.n_jobs = mp.cpu_count()
+
+    def fit(self, X, treatment, y):
+        """
+        Fit the UpliftRandomForestClassifier.
+
+        Args
+        ----
+        X : ndarray, shape = [num_samples, num_features]
+            An ndarray of the covariates used to train the uplift model.
+
+        treatment : array-like, shape = [num_samples]
+            An array containing the treatment group for each unit.
+
+        y : array-like, shape = [num_samples]
+            An array containing the outcome of interest for each unit.
+        """
+        np.random.seed(self.random_state)
+
+        # Get treatment group keys
+        treatment_group_keys = list(set(treatment))
+        treatment_group_keys.remove(self.control_name)
+        treatment_group_keys.sort()
+        self.classes_ = {}
+        for i, treatment_group_key in enumerate(treatment_group_keys):
+            self.classes_[treatment_group_key] = i
+
+        self.uplift_forest = [
+                self.bootstrap_pm(X, treatment, y, tree) for tree in self.uplift_forest
+        ]
+
+        all_importances = [tree.feature_importances_ for tree in self.uplift_forest]
+        self.feature_importances_ = np.mean(all_importances, axis=0)
+        self.feature_importances_ /= self.feature_importances_.sum()  # normalize to add to 1
+
+    @ignore_warnings(category=FutureWarning)
+    def predict(self, X, full_output=False):
+        '''
+        Returns the recommended treatment group and predicted optimal
+        probability conditional on using the recommended treatment group.
+
+        Args
+        ----
+        X : ndarray, shape = [num_samples, num_features]
+            An ndarray of the covariates used to train the uplift model.
+
+        full_output : bool, optional (default=False)
+            Whether the UpliftTree algorithm returns upliftScores, pred_nodes
+            alongside the recommended treatment group and p_hat in the treatment group.
+
+        Returns
+        -------
+        y_pred_list : ndarray, shape = (num_samples, num_treatments])
+            An ndarray  containing the predicted delta in each treatment group,
+            the best treatment group and the maximum delta.
+        
+        df_res : DataFrame, shape = [num_samples, (num_treatments + 1)]
+            If full_output, a DataFrame containing the predicted delta in each treatment group,
+            the best treatment group and the maximum delta.
+
+        '''
+        df_res = pd.DataFrame()
+        y_pred_ensemble = dict()
+        y_pred_list = np.zeros((X.shape[0], len(self.classes_)))
+
+        # Make prediction by each tree
+        for tree_i in range(len(self.uplift_forest)):
+
+            _, _, _, y_pred_full = self.uplift_forest[tree_i].predict(X=X, full_output=True)
+
+            if tree_i == 0:
+                for treatment_group in y_pred_full:
+                    y_pred_ensemble[treatment_group] = (
+                        np.array(y_pred_full[treatment_group]) / len(self.uplift_forest)
+                    )
+            else:
+                for treatment_group in y_pred_full:
+                    y_pred_ensemble[treatment_group] = (
+                        np.array(y_pred_ensemble[treatment_group])
+                        + np.array(y_pred_full[treatment_group]) / len(self.uplift_forest)
+                    )
+
+        # Summarize results into dataframe
+        for treatment_group in y_pred_ensemble:
+            df_res[treatment_group] = y_pred_ensemble[treatment_group]
+
+        df_res['recommended_treatment'] = df_res.apply(np.argmax, axis=1)
+
+        # Calculate delta
+        delta_cols = []
+        for treatment_group in y_pred_ensemble:
+            if treatment_group != self.control_name:
+                delta_cols.append('delta_%s' % (treatment_group))
+                df_res['delta_%s' % (treatment_group)] = df_res[treatment_group] - df_res[self.control_name]
+                # Add deltas to results list
+                y_pred_list[:, self.classes_[treatment_group]] = df_res['delta_%s' % (treatment_group)].values
+        df_res['max_delta'] = df_res[delta_cols].max(axis=1)
+
+        if full_output:
+            return df_res
+        else:
+            return y_pred_list
+
+    @staticmethod
+    def bootstrap_pm(X, treatment, y, tree):
+        '''
+        Serve for bootstrap function. 
+        Before feeding to train a tree, we enhance the data by matching on X.
+        
+        Args
+        ----
+        X : ndarray, shape = [num_samples, num_features]
+            An ndarray of the covariates used to train the uplift model.
+
+        treatment : array-like, shape = [num_samples]
+            An array containing the treatment group for each unit.
+
+        y : array-like, shape = [num_samples]
+            An array containing the outcome of interest for each unit.
+            
+        tree: UpliftTreeclassifier Object
+        '''
+        train_ids = np.arange(0, len(X))
+        num_treatments = len(set(treatment))
+        t_id = [0] * len(treatment)
+        for i in range(len(treatment)):
+            if treatment[i] == "treatment1":
+                t_id[i] = 1
+            elif treatment[i] == "treatment2":
+                t_id[i] = 2
+            elif treatment[i] == "treatment3":
+                t_id[i] = 3
+        t_id = np.array(t_id)
+        batch = BatchEnhancementOnX()
+        batch.make_propensity_lists(train_ids, X, t_id, num_treatments)
+
+        bt_index = np.random.choice(len(X), len(X), replace=False)
         x_train_bt = X[bt_index]
         y_train_bt = y[bt_index]
         t_train_bt = t_id[bt_index]
