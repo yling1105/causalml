@@ -22,7 +22,7 @@ from sklearn.utils.testing import ignore_warnings
 from collections import defaultdict
 from joblib import Parallel, delayed
 import multiprocessing as mp
-from batch_enhancement import BatchEnhancementOnX
+from tree.batch_enhancement import BatchEnhancementOnX
 
 class DecisionTree:
     """ Tree Node Class
@@ -1481,10 +1481,9 @@ class PMUpliftRandomForestClassifier:
         for i, treatment_group_key in enumerate(treatment_group_keys):
             self.classes_[treatment_group_key] = i
 
-        self.uplift_forest = (
-            Parallel(n_jobs=self.n_jobs)
-            (delayed(self.bootstrap_pm)(X, treatment, y, tree) for tree in self.uplift_forest)
-        )
+        self.uplift_forest = [
+                self.bootstrap_pm(X, treatment, y, tree) for tree in self.uplift_forest
+        ]
 
         all_importances = [tree.feature_importances_ for tree in self.uplift_forest]
         self.feature_importances_ = np.mean(all_importances, axis=0)
@@ -1563,16 +1562,38 @@ class PMUpliftRandomForestClassifier:
         '''
         Serve for bootstrap function. 
         Before feeding to train a tree, we enhance the data by matching on X.
+        
+        Args
+        ----
+        X : ndarray, shape = [num_samples, num_features]
+            An ndarray of the covariates used to train the uplift model.
+
+        treatment : array-like, shape = [num_samples]
+            An array containing the treatment group for each unit.
+
+        y : array-like, shape = [num_samples]
+            An array containing the outcome of interest for each unit.
+            
+        tree: UpliftTreeclassifier Object
         '''
-        train_ids = len(X) - 1
+        train_ids = np.arange(0, len(X))
         num_treatments = len(set(treatment))
+        t_id = [0] * len(treatment)
+        for i in range(len(treatment)):
+            if treatment[i] == "treatment1":
+                t_id[i] = 1
+            elif treatment[i] == "treatment2":
+                t_id[i] = 2
+            elif treatment[i] == "treatment3":
+                t_id[i] = 3
+        t_id = np.array(t_id)
         batch = BatchEnhancementOnX()
-        batch.make_propensity_lists(train_ids, X, t, num_treatments)
+        batch.make_propensity_lists(train_ids, X, t_id, num_treatments)
 
         bt_index = np.random.choice(len(X), len(X))
         x_train_bt = X[bt_index]
         y_train_bt = y[bt_index]
-        t_train_bt = treatment[bt_index]
+        t_train_bt = t_id[bt_index]
 
         t_indices = list(map(lambda t_idx: np.where(t_train_bt == t_idx)[0], range(num_treatments)))
         t_lens = list(map(lambda x: len(x), t_indices))
@@ -1582,6 +1603,18 @@ class PMUpliftRandomForestClassifier:
 
         inner_x, inner_t, inner_y = x_train_bt[base_indices], t_train_bt[base_indices], y_train_bt[base_indices]
 
-        x_batch, t_batch, y_batch = batch.enhance_batch_with_propensity_matches(X, t, y, inner_x, inner_t, inner_y, num_treatments, 6)
-        tree.fit(X=x_batch, treatment=t_batch, y=y_batch)
-        return tree
+        x_batch, t_batch, y_batch = batch.enhance_batch_with_propensity_matches(X, t_id, y, inner_x, inner_t, inner_y, num_treatments, 6)
+        t_batch_new = [0] * len(t_batch)
+        for i in range(len(t_batch)):
+            if t_batch[i] == 0:
+                t_batch_new[i] = "control"
+            elif t_batch[i] == 1:
+                t_batch_new[i] = "treatment1"
+            elif t_batch[i] == 2:
+                t_batch_new[i] = "treatment2"
+            else:
+                t_batch_new[i] = "treatment3"
+        t_batch_new = np.array(t_batch_new)
+        t_batch_new.astype(object)
+        tree.fit(X=x_batch, treatment=t_batch_new, y=y_batch)
+        return tree  
