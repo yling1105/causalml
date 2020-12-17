@@ -1422,8 +1422,7 @@ class BTPMUpliftRandomForest:
                  n_reg=10,
                  evaluationFunction=None,
                  control_name=None,
-                 normalization=True,
-                 n_jobs=-1):
+                 normalization=True):
         """
         Initialize the UpliftRandomForestClassifier class.
         """
@@ -1437,7 +1436,6 @@ class BTPMUpliftRandomForest:
         self.n_reg = n_reg
         self.evaluationFunction = evaluationFunction
         self.control_name = control_name
-        self.n_jobs = n_jobs
 
         # Create forest
         self.uplift_forest = []
@@ -1453,8 +1451,6 @@ class BTPMUpliftRandomForest:
 
             self.uplift_forest.append(uplift_tree)
 
-        if self.n_jobs == -1:
-            self.n_jobs = mp.cpu_count()
 
     def fit(self, X, treatment, y):
         """
@@ -1677,8 +1673,7 @@ class PMUpliftRandomForest:
                  n_reg=10,
                  evaluationFunction=None,
                  control_name=None,
-                 normalization=True,
-                 n_jobs=-1):
+                 normalization=True):
         """
         Initialize the UpliftRandomForestClassifier class.
         """
@@ -1692,7 +1687,6 @@ class PMUpliftRandomForest:
         self.n_reg = n_reg
         self.evaluationFunction = evaluationFunction
         self.control_name = control_name
-        self.n_jobs = n_jobs
 
         # Create forest
         self.uplift_forest = []
